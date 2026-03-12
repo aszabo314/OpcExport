@@ -332,13 +332,18 @@ module Shader =
         }
 
 let exportToObj (opcPath : string) (outFolder : string)=
-    let patchHierarchies = 
+    Log.startTimed "discovering OPCs in %s" opcPath
+    let patchHierarchies =
         List.concat [
             Discover.discoverOpcs opcPath
         ] |> List.map OpcPaths
-    let hs = 
-        patchHierarchies 
+    Log.stop()
+
+    Log.startTimed "loading %d patch hierarchies" patchHierarchies.Length
+    let hs =
+        patchHierarchies
         |> List.map (fun p -> p, PatchHierarchy.load Serialization.binarySerializer.Pickle Serialization.binarySerializer.UnPickle p)
+    Log.stop()
         
     let ids = ResizeArray<int>()
     let pos = ResizeArray<V3d>()
@@ -418,62 +423,83 @@ map_Kd atlas_{outIndex}.png
     
     for (p,h) in hs do
         let ls = QTree.getLeaves h.tree
+        Log.startTimed "processing OPC (%d leaves)" (ls |> Seq.length)
         for l in ls do
+            Log.startTimed "patch %s" l.info.Name
+
+            Log.startTimed "loading geometry and texture"
             let (ig,_) = Patch.load p ViewerModality.XYZ l.info
             let texPath = Patch.extractTexturePath p l.info 0
             let tex = PixImage.Load(texPath).ToPixImage<byte>(Col.Format.RGBA)
+            Log.stop()
+
             let region = add texPath tex
             let uvScale = V2f(tex.Size) / V2f(atlas.Size)
             let uvOffset = V2f(region.Min) / V2f(atlas.Size)
             let remap (tc : V2f) =
-                tc * uvScale + uvOffset
-                
-                
+                V2f(tc.X, tc.Y) * uvScale + uvOffset
+
+
             let index = ig.IndexArray |> unbox<int[]>
-            
+
             let inputPos =
                 ig.IndexedAttributes.[DefaultSemantic.Positions]
                 |> unbox<V3f[]>
-            
+
             let uv =
                 ig.IndexedAttributes.[DefaultSemantic.DiffuseColorCoordinates]
                 |> unbox<V2f[]>
-            
+
+            Log.startTimed "processing %d triangles" (index.Length / 3)
             let cache = Dict<int, int>()
             let posBuffer = ResizeArray()
             let uvBuffer = ResizeArray()
-            
-            let idxBuffer = Array.zeroCreate index.Length
-            
+            let idxBuffer = ResizeArray()
+
             let trafo = l.info.Local2Global
-            let mutable oi = 0
+
+            let getOrAdd (i : int) =
+                let si = cache.GetOrCreate(i, fun _ ->
+                    let idx = posBuffer.Count
+                    posBuffer.Add(trafo.TransformPos (V3d inputPos.[i]))
+                    let uv = remap uv.[i]
+                    let uv = V2f.IO - uv
+                    uvBuffer.Add(uv)
+                    idx)
+                si + pos.Count
+
             let mutable ai = 0
+            let mutable skipped = 0
             while ai < index.Length do
-                ai <- ai + 3
                 let i0 = index.[ai]
                 let i1 = index.[ai + 1]
                 let i2 = index.[ai + 2]
-                
-                let si0 = cache.GetOrCreate(i0, fun _ -> posBuffer.Count)
-                let si1 = cache.GetOrCreate(i1, fun _ -> posBuffer.Count)
-                let si2 = cache.GetOrCreate(i2, fun _ -> posBuffer.Count)
-            
-                if si < posBuffer.Count then
-                    idxBuffer.[oi] <- si
+
+                if not (Vec.AnyNaN inputPos.[i0] || Vec.AnyNaN inputPos.[i1] || Vec.AnyNaN inputPos.[i2]) then
+                    let si0 = getOrAdd i0
+                    let si1 = getOrAdd i1
+                    let si2 = getOrAdd i2
+                    idxBuffer.Add si0
+                    idxBuffer.Add si1
+                    idxBuffer.Add si2
                 else
-                    posBuffer.Add(trafo.TransformPos (V3d inputPos.[i]))
-                    uvBuffer.Add(remap uv.[i])
-                    idxBuffer.[oi] <- si + pos.Count
-                oi <- oi + 1
-            
-         
+                    skipped <- skipped + 1
+
+                ai <- ai + 3
+
+            if skipped > 0 then Log.warn "skipped %d NaN triangles" skipped
+            Log.stop()
+
             pos.AddRange(posBuffer)
             tc.AddRange(uvBuffer)
             ids.AddRange(idxBuffer)
-            
+
             let dst = atlas.Volume.SubVolume(V3l(region.Min.X,region.Min.Y,0),V3l(tex.Size.X,tex.Size.Y,4))
             dst.Set(tex.Volume) |> ignore
-        
+
+            Log.stop() // patch
+        Log.stop() // OPC
+
     flush()
             
 [<EntryPoint>]
