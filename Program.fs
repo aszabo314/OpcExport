@@ -231,106 +231,6 @@ type PatchLodTree(globalCenter : V3d, opc : OpcPaths, root : option<ILodTreeNode
 
     new(globalCenter : V3d, paths : OpcPaths, p : QTree<Patch>) = PatchLodTree(globalCenter, paths, None, None, 0, p)
 
-
-module Shader =
-    open FShade
-    
-    type LodVertex =
-        {
-            [<Position>] pos : V4f
-            [<TexCoord>] tc : V2f
-            [<Semantic("ViewPosition")>] vp : V4f
-            [<Color>] col : V4f
-            [<Normal>] n : V3f
-            [<Semantic("TreeId")>] id : int
-            [<Semantic("DiffuseColorTextureTrafo")>] textureTrafo : V4f
-        }
-        
-    type UniformScope with
-        member x.ModelTrafos : M44f[] = x?StorageBuffer?ModelTrafos
-        member x.ModelViewTrafos : M44f[] = x?StorageBuffer?ModelViewTrafos
-
-    let trafo (v : LodVertex) =       
-        vertex { 
-            let mv = uniform.ModelViewTrafos.[v.id]
-            //let f = if magic then 0.07 else 1.0 / 0.3
-
-            let vp = mv * v.pos
-            let vn = mv * V4f(v.n, 0.0f) |> Vec.xyz |> Vec.normalize
-            let pp = uniform.ProjTrafo * vp
-
-            
-            let mutable tc = v.tc
-            if tc.X < 0.0f then tc.X <- 0.0f
-            elif tc.X > 1.0f then tc.X <- 1.0f
-            if tc.Y < 0.0f then tc.Y <- 0.0f
-            elif tc.Y > 1.0f then tc.Y <- 1.0f
-
-            tc.Y <- 1.0f - tc.Y
-
-            let tc =
-                let trafo = v.textureTrafo
-                if trafo.Z < 0.0f then
-                    V2f(-trafo.Z, trafo.W) * V2f(1.0f - tc.Y, tc.X) + trafo.XY
-                else
-                    trafo.ZW * tc + trafo.XY
-
-
-            return { v with pos = pp; vp = vp; n = vn; tc = tc }
-
-        }
-        
-    let normals (v : Triangle<LodVertex>) =       
-        triangle { 
-            let p0 = v.P0.vp.XYZ
-            let p1 = v.P1.vp.XYZ
-            let p2 = v.P2.vp.XYZ
-
-            let vn = Vec.cross (p1 - p0) (p2 - p0) |> Vec.normalize
-
-            yield { v.P0 with n = vn }
-            yield { v.P1 with n = vn }
-            yield { v.P2 with n = vn }
-
-        }
-        
-    let sam =
-        sampler2d {
-            texture uniform?DiffuseColorTexture
-            filter Filter.MinLinearMagPointMipLinear
-            addressU WrapMode.Wrap
-            addressV WrapMode.Wrap
-            maxAnisotropy 16
-        }
-
-
-
-    let light (v : LodVertex) =    
-        fragment {
-            
-            let tc = 
-                let mutable tc = V2f(v.tc.X % 1.0f, v.tc.Y % 1.0f)
-                if tc.X < 0.0f then tc.X <- 1.0f + tc.X
-                if tc.Y < 0.0f then tc.Y <- 1.0f + tc.Y
-                tc
-
-            if uniform?MipMaps then
-                if uniform?Anisotropic then
-                    return sam.Sample(tc)
-                else
-                    let s = V2f sam.Size
-                    let maxLevel = sam.MipMapLevels - 1 |> float32
-
-                    let dx = s * ddx v.tc
-                    let dy = s * ddy v.tc
-
-                    let level = log2 (max (Vec.length dx) (Vec.length dy)) |> clamp 0.0f maxLevel
-
-                    return sam.SampleLevel(v.tc, level)
-            else
-                return sam.SampleLevel(v.tc, 0.0f)
-        }
-
 let exportToObj (opcPath : string) (outFolder : string)=
     Log.startTimed "discovering OPCs in %s" opcPath
     let patchHierarchies =
@@ -437,7 +337,7 @@ map_Kd atlas_{outIndex}.png
             let uvScale = V2f(tex.Size) / V2f(atlas.Size)
             let uvOffset = V2f(region.Min) / V2f(atlas.Size)
             let remap (tc : V2f) =
-                V2f(tc.X, tc.Y) * uvScale + uvOffset
+                V2f(tc.X, 1.0f - tc.Y) * uvScale + uvOffset
 
 
             let index = ig.IndexArray |> unbox<int[]>
@@ -463,7 +363,7 @@ map_Kd atlas_{outIndex}.png
                     let idx = posBuffer.Count
                     posBuffer.Add(trafo.TransformPos (V3d inputPos.[i]))
                     let uv = remap uv.[i]
-                    let uv = V2f.IO - uv
+                    let uv = V2f(uv.X, 1.0f - uv.Y)
                     uvBuffer.Add(uv)
                     idx)
                 si + pos.Count
