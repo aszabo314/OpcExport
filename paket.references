@@ -4,3 +4,4 @@ Aardvark.Application.Slim
 Aardvark.Geometry
 Aardvark.PixImage.ImageSharp
 Aardvark.PixImage.Devil
+Aardvark.Data.Wavefront
