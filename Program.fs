@@ -231,9 +231,35 @@ type PatchLodTree(globalCenter : V3d, opc : OpcPaths, root : option<ILodTreeNode
 
     new(globalCenter : V3d, paths : OpcPaths, p : QTree<Patch>) = PatchLodTree(globalCenter, paths, None, None, 0, p)
 
-let exportToObj (opcPaths : list<string>) (outFolder : string) =
+let exportToObj (opcPaths : list<string>) (outFolder : string) (alignToZUp : bool) =
     let total = opcPaths.Length
     Log.line "exporting %d OPC path(s) to %s" total outFolder
+
+    let alignTrafo =
+        if alignToZUp then
+            Log.startTimed "estimating up vector from first dataset"
+            let firstOpcPath = opcPaths |> List.head
+            let firstOpc = Discover.discoverOpcs firstOpcPath |> List.head |> OpcPaths
+            let firstH = PatchHierarchy.load Serialization.binarySerializer.Pickle Serialization.binarySerializer.UnPickle firstOpc
+            let rootPatch =
+                match firstH.tree with
+                | QTree.Leaf p -> p
+                | QTree.Node(p, _) -> p
+            let approxCenter = rootPatch.info.GlobalBoundingBox.Center
+            let upVector = approxCenter.Normalized
+            Log.line "up vector: %.6f %.6f %.6f" upVector.X upVector.Y upVector.Z
+            Log.stop()
+            let cross = Vec.Cross(upVector, V3d.OOI)
+            let dot = Vec.Dot(upVector, V3d.OOI)
+            if cross.Length < 1e-10 then
+                if dot > 0.0 then Trafo3d.Identity
+                else Trafo3d.Rotation(V3d.IOO, Constant.Pi)
+            else
+                Trafo3d.Rotation(cross.Normalized, acos(Fun.Clamp(dot, -1.0, 1.0)))
+        else
+            Trafo3d.Identity
+
+    let transformPos (p : V3d) = alignTrafo.Forward.TransformPos(p)
 
     for opcIdx, opcPath in opcPaths |> List.indexed do
         let dirName = System.IO.Path.GetFileName(opcPath)
@@ -261,17 +287,24 @@ let exportToObj (opcPaths : list<string>) (outFolder : string) =
         let mutable outIndex = 0
 
         let flush() =
-            let fn = Path.combine [subFolder; $"atlas_{outIndex}.png"]
+            let fn = Path.combine [subFolder; $"model_{outIndex}_atlas.jpg"]
 
             Log.startTimed "saving atlas %s" fn
             atlas.Save(fn)
             Log.stop()
 
             let centroid = pos |> Seq.average
+            let mutable bboxMin = V3d(System.Double.MaxValue)
+            let mutable bboxMax = V3d(System.Double.MinValue)
+            for p in pos do
+                bboxMin <- V3d.Min(bboxMin, p)
+                bboxMax <- V3d.Max(bboxMax, p)
 
             Log.startTimed "saving obj, %d positions" pos.Count
-            let centroidFn = Path.combine [subFolder; $"centroid_%d{outIndex}.txt"]
+            let centroidFn = Path.combine [subFolder; $"model_centroid.txt"]
             System.IO.File.WriteAllText(centroidFn, $"%.8f{centroid.X} %.8f{centroid.Y} %.8f{centroid.Z}")
+            let bboxFn = Path.combine [subFolder; $"model_bbox.txt"]
+            System.IO.File.WriteAllText(bboxFn, $"%.8f{bboxMin.X} %.8f{bboxMin.Y} %.8f{bboxMin.Z} %.8f{bboxMax.X} %.8f{bboxMax.Y} %.8f{bboxMax.Z}")
             let objFn = Path.combine [subFolder; $"model_%d{outIndex}.obj"]
             use f = System.IO.File.OpenWrite objFn
             use w = new System.IO.StreamWriter(f, Encoding.UTF8)
@@ -299,7 +332,7 @@ Ks 0.0 0.0 0.0
 d 1.0
 Ns 0.0
 illum 0
-map_Kd atlas_{outIndex}.png
+map_Kd model_{outIndex}_atlas.jpg
 """
             System.IO.File.WriteAllText(mtlFn, mtlString)
 
@@ -369,7 +402,7 @@ map_Kd atlas_{outIndex}.png
                 let getOrAdd (i : int) =
                     let si = cache.GetOrCreate(i, fun _ ->
                         let idx = posBuffer.Count
-                        posBuffer.Add(trafo.TransformPos (V3d inputPos.[i]))
+                        posBuffer.Add(transformPos (trafo.TransformPos (V3d inputPos.[i])))
                         let uv = remap uv.[i]
                         let uv = V2f(uv.X, 1.0f - uv.Y)
                         uvBuffer.Add(uv)
@@ -638,25 +671,25 @@ let main argv =
 
     Aardvark.Init()
 
-    mergeObjFiles [
-        @"D:\bla\mesh\Hessigheim\Epoch_March2018\Mesh\per-tile\test\51387_542653_20"
-        @"D:\bla\mesh\Hessigheim\Epoch_March2018\Mesh\per-tile\test\51387_542658_20"
-    ] @"D:\bla\mergeObj\Hess-201803\mergy"
-    mergeObjFiles [
-        @"D:\bla\mesh\Hessigheim\Epoch_November2018\Mesh\per_tile\test\51386_542652_17"
-        @"D:\bla\mesh\Hessigheim\Epoch_November2018\Mesh\per_tile\test\51386_542658_17"
-    ] @"D:\bla\mergeObj\Hess-201903\mergy201903"
-    mergeObjFiles [
-        @"D:\bla\mesh\Hessigheim\Epoch_March2019\Mesh\per_tile\test\51385_542652_22"
-        @"D:\bla\mesh\Hessigheim\Epoch_March2019\Mesh\per_tile\test\51385_542658_22"
-    ] @"D:\bla\mergeObj\Hess-201811\mergy201811"
-    exit 0
-    // exportToObj [
-    //     @"D:\bla\opc\1257_Perjen_Demo\Perjen_Ost\10_AU"
-    //     @"D:\bla\opc\1257_Perjen_Demo\Perjen_Ost\10_RA"
-    //     @"D:\bla\opc\1257_Perjen_Demo\Perjen_Ost\10_SpB1"
-    // ] @"D:\bla\OpcObj"
-    // exit 0 
+    // mergeObjFiles [
+    //     @"D:\bla\mesh\Hessigheim\Epoch_March2018\Mesh\per-tile\test\51387_542653_20"
+    //     @"D:\bla\mesh\Hessigheim\Epoch_March2018\Mesh\per-tile\test\51387_542658_20"
+    // ] @"D:\bla\mergeObj\Hess-201803\mergy"
+    // mergeObjFiles [
+    //     @"D:\bla\mesh\Hessigheim\Epoch_November2018\Mesh\per_tile\test\51386_542652_17"
+    //     @"D:\bla\mesh\Hessigheim\Epoch_November2018\Mesh\per_tile\test\51386_542658_17"
+    // ] @"D:\bla\mergeObj\Hess-201903\mergy201903"
+    // mergeObjFiles [
+    //     @"D:\bla\mesh\Hessigheim\Epoch_March2019\Mesh\per_tile\test\51385_542652_22"
+    //     @"D:\bla\mesh\Hessigheim\Epoch_March2019\Mesh\per_tile\test\51385_542658_22"
+    // ] @"D:\bla\mergeObj\Hess-201811\mergy201811"
+    // exit 0
+    exportToObj [
+        // @"D:\bla\opc\VictoriaCrater\HiRISE_VictoriaCrater"
+        // @"D:\bla\opc\VictoriaCrater\HiRISE_VictoriaCrater_SuperResolution"
+        @"D:\bla\opc\VictoriaCrater\MER-B_CapeDesire_wbs"
+    ] @"D:\bla\OpcObj" true
+    exit 0 
     
 
     0
